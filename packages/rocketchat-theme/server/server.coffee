@@ -1,11 +1,41 @@
 less = Npm.require('less')
+autoprefixer = Npm.require('less-plugin-autoprefix')
+crypto = Npm.require('crypto')
+
+calculateClientHash = WebAppHashing.calculateClientHash
+WebAppHashing.calculateClientHash = (manifest, includeFilter, runtimeConfigOverride) ->
+	css = RocketChat.theme.getCss()
+
+	WebAppInternals.staticFiles['/__cordova/theme.css'] = WebAppInternals.staticFiles['/theme.css'] =
+		cacheable: true
+		sourceMapUrl: undefined
+		type: 'css'
+		content: css
+
+	hash = crypto.createHash('sha1').update(css).digest('hex')
+
+	themeManifestItem = _.find manifest, (item) -> return item.path is 'app/theme.css'
+	if not themeManifestItem?
+		themeManifestItem = {}
+		manifest.push themeManifestItem
+
+	themeManifestItem.path = 'app/theme.css'
+	themeManifestItem.type = 'css'
+	themeManifestItem.cacheable = true
+	themeManifestItem.where = 'client'
+	themeManifestItem.url = "/theme.css?#{hash}"
+	themeManifestItem.size = css.length
+	themeManifestItem.hash = hash
+
+	calculateClientHash.call this, manifest, includeFilter, runtimeConfigOverride
+
 
 RocketChat.theme = new class
 	variables: {}
+	packageCallbacks: []
 	files: [
 		'assets/stylesheets/global/_variables.less'
 		'assets/stylesheets/utils/_emojione.import.less'
-		'assets/stylesheets/utils/_fonts.import.less'
 		'assets/stylesheets/utils/_keyframes.import.less'
 		'assets/stylesheets/utils/_lesshat.import.less'
 		'assets/stylesheets/utils/_preloader.import.less'
@@ -42,10 +72,18 @@ RocketChat.theme = new class
 
 		content.push Assets.getText file for file in @files
 
+		for packageCallback in @packageCallbacks
+			result = packageCallback()
+			if _.isString result
+				content.push result
+
 		content = content.join '\n'
 
 		options =
 			compress: true
+			plugins: [
+				new autoprefixer()
+			]
 
 		start = Date.now()
 		less.render content, options, (err, data) ->
@@ -55,20 +93,21 @@ RocketChat.theme = new class
 
 			RocketChat.settings.updateById 'css', data.css
 
-			RocketChat.Notifications.notifyAll 'theme-updated'
+			process.emit('message', {refresh: 'client'})
 
-	addVariable: (type, name, value, isPublic=true) ->
+	addVariable: (type, name, value, persist=true) ->
 		@variables[name] =
 			type: type
 			value: value
 
-		config =
-			group: 'Theme'
-			type: type
-			section: type
-			public: isPublic
+		if persist is true
+			config =
+				group: 'Theme'
+				type: type
+				section: type
+				public: false
 
-		RocketChat.settings.add "theme-#{type}-#{name}", value, config
+			RocketChat.settings.add "theme-#{type}-#{name}", value, config
 
 	addPublicColor: (name, value) ->
 		@addVariable 'color', name, value, true
@@ -87,17 +126,8 @@ RocketChat.theme = new class
 
 		return items.join '\n'
 
+	addPackageAsset: (cb) ->
+		@packageCallbacks.push cb
+
 	getCss: ->
 		return RocketChat.settings.get 'css'
-
-
-WebApp.connectHandlers.use '/theme.css', (req, res, next) ->
-	css = RocketChat.theme.getCss()
-
-	res.setHeader 'content-type', 'text/css; charset=UTF-8'
-	res.setHeader 'Content-Disposition', 'inline'
-	res.setHeader 'Cache-Control', 'no-cache'
-	res.setHeader 'Pragma', 'no-cache'
-	res.setHeader 'Expires', '0'
-
-	res.end css
